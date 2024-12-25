@@ -19,3 +19,9 @@
   become: true
   roles:
     - role: k3s_agent
+
+- name: Setup kube config on control node
+  hosts: server
+  become: false
+  roles:
+    - role: kubeconfig
