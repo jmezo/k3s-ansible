@@ -1,0 +1,74 @@
+---
+- name: Init first server node
+  when: inventory_hostname == groups[server_group][0]
+  block:
+    - name: Check whether kubectl is installed on control node
+      ansible.builtin.command: 'kubectl'
+      register: kubectl_installed
+      ignore_errors: true
+      delegate_to: 127.0.0.1
+      become: false
+      changed_when: false
+
+    - name: Apply K3S kubeconfig to control node
+      when:
+        - kubectl_installed.rc == 0
+      block:
+        - name: Set backup filename
+          ansible.builtin.set_fact:
+            backup_name: "{{ kubeconfig }}.{{ ansible_date_time.iso8601_basic_short }}.bak"
+          delegate_to: 127.0.0.1
+          become: false
+
+        - name: Backup existing kubeconfig
+          ansible.builtin.copy:
+            src: "{{ kubeconfig }}"
+            dest: "{{ backup_name }}"
+            remote_src: true
+          delegate_to: 127.0.0.1
+          become: false
+          changed_when: true
+
+        - name: Copy kubeconfig to control node
+          ansible.builtin.fetch:
+            src: /etc/rancher/k3s/k3s.yaml
+            dest: "{{ kubeconfig }}"
+            flat: true
+
+        - name: Change server address in kubeconfig on control node
+          ansible.builtin.shell: |
+            KUBECONFIG={{ kubeconfig }} kubectl config set-cluster default --server=https://{{ api_endpoint }}:{{ api_port }}
+          delegate_to: 127.0.0.1
+          become: false
+          register: csa_result
+          changed_when:
+            - csa_result.rc == 0
+
+        - name: Setup kubeconfig context on control node - {{ cluster_context }}
+          ansible.builtin.replace:
+            path: "{{ kubeconfig }}"
+            regexp: 'name: default'
+            replace: 'name: {{ cluster_context }}'
+          delegate_to: 127.0.0.1
+          become: false
+
+        - name: Merge with any existing kubeconfig on control node
+          ansible.builtin.shell: |
+            TFILE=$(mktemp)
+            KUBECONFIG={{ kubeconfig }}:{{ backup_name }} kubectl config set-context {{ cluster_context }} --user={{ cluster_context }} --cluster={{ cluster_context }}
+            KUBECONFIG={{ kubeconfig }}:{{ backup_name }} kubectl config view --flatten > ${TFILE}
+            mv ${TFILE} {{ kubeconfig }}
+          delegate_to: 127.0.0.1
+          become: false
+          register: mv_result
+          changed_when:
+            - mv_result.rc == 0
+
+        - name: Set kubectl context to {{ cluster_context }}
+          ansible.builtin.shell: |
+            KUBECONFIG={{ kubeconfig }} kubectl config use-context {{ cluster_context }}
+          delegate_to: 127.0.0.1
+          become: false
+          register: set_context_result
+          changed_when:
+            - set_context_result.rc == 0
